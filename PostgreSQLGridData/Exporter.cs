@@ -7,7 +7,9 @@ using System.Globalization;
 using SimioAPI.Extensions;
 using System.Text.RegularExpressions;
 using Npgsql;
+
 using System.Web;
+using NpgsqlTypes;
 
 namespace PostgreSQLGridData
 {
@@ -486,70 +488,75 @@ namespace PostgreSQLGridData
         }
 
         private static void CopyDataToTable(ExporterConnection exporterConnection, DataTable dt, string insertSQL, string tableName)
-        {            
-            foreach (DataRow dataRow in dt.Rows)
+        {
+            string tableNameAndColumns = tableName + "(";
+
+            if (dt.Rows.Count > 0)
             {
-                string rowValues = String.Empty;
+                int colIdx = 0;
                 foreach (DataColumn dataColumn in dt.Columns)
                 {
-                    if (rowValues.Length > 0)
-                        rowValues += ", ";
-
-                    var dataValue = dataRow[dataColumn];
-                    if ((dataValue == null || Convert.ToString(dataValue).Length == 0) && dataColumn.AllowDBNull)
-                    {
-                        rowValues += "NULL";
-                    }
-                    else
-                    {
-                        if (dataColumn.DataType.IsPrimitive) // int, bool, double, float, etc...
-                        {
-                            object typedValue = null;
-                            if (dataValue == null)
-                            {
-                                // No data value given, however we failed the AllowDBNull check above, so 
-                                //  no null values allowed, just give them the default vaue for the type
-                                typedValue = Activator.CreateInstance(dataColumn.DataType);
-                            }
-                            else
-                            {
-                                typedValue = Convert.ChangeType(dataValue, dataColumn.DataType, CultureInfo.InvariantCulture);
-                            }
-
-                            // Using InvariantCulture because decimal separator must be ".", something like "," would be invalid SQL
-                            var typedStringValue = String.Format(CultureInfo.InvariantCulture, "{0}", typedValue);
-
-                            rowValues += typedStringValue;
-                                
-                        }
-                        else if (dataColumn.DataType == typeof(DateTime))
-                        {
-                            DateTime dateValue = new DateTime(2008, 1, 1); // It's the default we used elsewhere in here
-                            if (dataValue != null)
-                                dateValue = Convert.ToDateTime(dataValue);
-
-                            rowValues += $"'{dateValue.ToString(exporterConnection.DateTimeFormat)}'";
-                                
-                        }
-                        else
-                        {
-                            string colValue = Convert.ToString(dataValue ?? String.Empty);
-                            if (colValue.Length > 0)
-                                rowValues += $"'{colValue}'";
-                            else
-                                rowValues += "''";
-                        }
-                    }
+                    if (colIdx == 0) tableNameAndColumns += dataColumn.ColumnName;
+                    else tableNameAndColumns += "," + dataColumn.ColumnName;
+                    colIdx++;
                 }
+                tableNameAndColumns += ")";
 
-                using (var cmd = exporterConnection.Connection.CreateCommand())
+                using (var writer = exporterConnection.Connection.BeginBinaryImport($"COPY {tableNameAndColumns} FROM STDIN(Format BINARY)"))
                 {
-                    var sql = $"INSERT INTO {tableName} ( {insertSQL} ) VALUES ( {rowValues} )";
-                    cmd.CommandTimeout = exporterConnection.ConnectionTimeOut;
-                    cmd.CommandText = sql;
-                    cmd.ExecuteNonQuery();
+                    foreach (DataRow dataRow in dt.Rows)
+                    {
+                        writer.StartRow();
+                        foreach (DataColumn dataColumn in dt.Columns)
+                        {
+                            var dataValue = dataRow[dataColumn];
+                            if ((dataValue == null || Convert.ToString(dataValue).Length == 0) && dataColumn.AllowDBNull)
+                            {
+                                writer.WriteNull();
+                            }
+                            else
+                            {
+                                if (dataColumn.DataType.IsPrimitive) // int, bool, double, float, etc...
+                                {
+                                    object typedValue = null;
+                                    if (dataValue == null)
+                                    {
+                                        // No data value given, however we failed the AllowDBNull check above, so 
+                                        //  no null values allowed, just give them the default vaue for the type
+                                        typedValue = Activator.CreateInstance(dataColumn.DataType);
+                                    }
+                                    else
+                                    {
+                                        typedValue = Convert.ChangeType(dataValue, dataColumn.DataType, CultureInfo.InvariantCulture);
+                                    }
+
+                                    if (dataColumn.DataType == typeof(bool)) writer.Write(dataValue, NpgsqlDbType.Boolean);
+                                    else if (dataColumn.DataType == typeof(Single)) writer.Write(dataValue, NpgsqlDbType.Real);
+                                    else if (dataColumn.DataType == typeof(double) || dataColumn.DataType == typeof(decimal)) writer.Write(dataValue, NpgsqlDbType.Double);
+                                    else writer.Write(dataValue, NpgsqlDbType.Integer);
+
+                                }
+                                else if (dataColumn.DataType == typeof(DateTime))
+                                {
+                                    DateTime dateValue = new DateTime(2008, 1, 1); // It's the default we used elsewhere in here
+                                    if (dataValue != null)
+                                        dateValue = Convert.ToDateTime(dataValue);
+
+                                    writer.Write(dateValue, NpgsqlDbType.Timestamp);
+                                }
+                                else
+                                {
+                                    string colValue = Convert.ToString(dataValue ?? String.Empty);
+                                    if (colValue.Length > 0)
+                                        writer.Write(colValue);
+                                    else
+                                        writer.Write(String.Empty);
+                                }
+                            }
+                        }
+                    }
+                    writer.Complete();
                 }
-                
             }
         }
 
@@ -722,7 +729,7 @@ namespace PostgreSQLGridData
                 }
                 valueString = intProp.ToString(CultureInfo.InvariantCulture);
             }
-            else if (dbColumnInfo.Type == typeof(double) || dbColumnInfo.Type == typeof(decimal))
+            else if (dbColumnInfo.Type == typeof(Single) || dbColumnInfo.Type == typeof(double) || dbColumnInfo.Type == typeof(decimal))
             {
                 if (valueString.Length > 0)
                 {
