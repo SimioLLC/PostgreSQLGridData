@@ -1,2 +1,2 @@
 # PostgreSQLGridData
-Import and Export Data Connector for PostgreSQLGridData
+Import and Export Data Connector for PostgreSQL.
